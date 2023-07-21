@@ -86,6 +86,22 @@ FString* hk_ConcatUrl(FString* final_url, FString* url_path) {
 	return final_url;
 }
 
+
+typedef wchar_t** (*SendRequest_t)(GCGObj* this_ptr, FString* a2, FString* a3, FString* a4, FString* a5);
+SendRequest_t o_SendRequest;
+
+
+void* hk_SendRequest(GCGObj* this_ptr, FString* a2, FString* a3, FString* a4, FString* a5) {
+
+	if (a2->letter_count > 0 &&
+		wcscmp(L"https://EBF8D.playfabapi.com/Client/Matchmake?sdk=Chiv2_Version", a2->str) == 0)
+	{
+		wcscpy_s(a2->str, static_cast<size_t>(a2->max_letters), L"http://" TARGET_API_ROOT "/api/playfab/Client/Matchmake");
+		log("hk_SendRequest Client/Matchmake");
+	}
+	return o_SendRequest(this_ptr, a2, a3, a4, a5);
+}
+
 unsigned long main_thread(void* lpParameter) {
 	log("BrowserPlugin started!");
 	MH_Initialize();
@@ -98,8 +114,11 @@ unsigned long main_thread(void* lpParameter) {
 	MH_CreateHook(module_base + 0x13DA280, hk_GetCurrentGames, reinterpret_cast<void**>(&o_GetCurrentGames));
 	MH_EnableHook(module_base + 0x13DA280);
 
-	MH_CreateHook(module_base + 0x14ACB70, hk_ConcatUrl, reinterpret_cast<void**>(&o_ConcatUrl));
-	MH_EnableHook(module_base + 0x14ACB70);
+	/*MH_CreateHook(module_base + 0x14ACB70, hk_ConcatUrl, reinterpret_cast<void**>(&o_ConcatUrl));
+	MH_EnableHook(module_base + 0x14ACB70);*/
+
+	MH_CreateHook(module_base + 0x14a1250, hk_SendRequest, reinterpret_cast<void**>(&o_SendRequest));
+	MH_EnableHook(module_base + 0x14a1250);
 
 	ExitThread(0);
 	return 0;
