@@ -96,6 +96,8 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\main.h" />
+    <ClInclude Include="include\sigs.h" />
     <ClInclude Include="Lib\MinHook\include\MinHook.h" />
     <ClInclude Include="Lib\MinHook\src\buffer.h" />
     <ClInclude Include="Lib\MinHook\src\hde\hde32.h" />
