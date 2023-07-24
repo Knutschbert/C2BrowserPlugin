@@ -25,6 +25,9 @@
     <ClCompile Include="Lib\MinHook\src\trampoline.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Lib\tiny-json\tiny-json.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Lib\MinHook\src\trampoline.h" />
@@ -41,5 +44,9 @@
     <ClInclude Include="include\sigs.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="Lib\tiny-json\tiny-json.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Lib\json.hpp" />
   </ItemGroup>
 </Project>

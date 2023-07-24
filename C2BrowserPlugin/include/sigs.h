@@ -1,23 +1,32 @@
 #pragma once
 
 // https://stackoverflow.com/a/8349281
-#define FUNCTYPES \
-	etype(SendRequest), \
-	etype(GetMotd), \
-	etype(GetCurrentGames), \
-	etype(IsNonPakFilenameAllowed), \
-	etype(FindFileInPakFiles_1), \
-	etype(FindFileInPakFiles_2), \
-	etype(UTBLLocalPlayer_Exec) 
 
-#define etype(x) F_##x
+#define FUNCTYPES \
+	etype(FViewport) \
+	etype(SendRequest) \
+	etype(GetMotd) \
+	etype(GetCurrentGames) \
+	etype(IsNonPakFilenameAllowed) \
+	etype(FindFileInPakFiles_1) \
+	etype(FindFileInPakFiles_2) \
+	etype(UTBLLocalPlayer_Exec) \
+	etype(GetGameInfo) \
+	etype(MaxFuncType)
+
+#define etype(x) uint32_t x = 0x0;
+
+
+#define etype(x) F_##x,
 typedef enum { FUNCTYPES }  FuncType;
 #undef etype
-//#define etype(x) #x
-//static const char* strFunc[] = { FUNCTYPES };
+#define etype(x) #x,
+static const char* strFunc[] = { FUNCTYPES };
 
 static const char* signatures[] =
 {
+	/*"FViewport"*/
+	"48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 30 33 ED C7 41 ?? FF FF FF FF",
 	/*"SendRequest"*/ 
 	"48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 40 48 8B D9 49 8B F9",
 	/*"GetMotd"*/ 
@@ -67,6 +76,8 @@ static const char* signatures[] =
 	/*"FindFileInPakFiles_2"*/ 
 	"48 8B C4 4C 89 48 ?? 4C 89 40 ?? 48 89 48 ?? 55 53 48 8B EC",
 	/*"UTBLLocalPlayer::Exec"*/
-	"75 1A 45 84 ED 75 15 48 85 F6 74 10 40 38 BE ? ? ? ? 74 07 32 DB E9 ? ? ? ? 48 8B 5D 60 49 8B D6 4C 8B 45 58 4C 8B CB 49 8B CF"
-	""
+	"75 1A 45 84 ED 75 15 48 85 F6 74 10 40 38 BE ? ? ? ? 74 07 32 DB E9 ? ? ? ? 48 8B 5D 60 49 8B D6 4C 8B 45 58 4C 8B CB 49 8B CF",
+	/*"GetGameInfo"*/
+	"48 8B C4 48 89 58 ?? 48 89 50 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 ?? ?? ?? ?? 48 81 EC E0 02 00 00",
+	
 };

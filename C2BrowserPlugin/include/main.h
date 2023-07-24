@@ -1,6 +1,19 @@
-#pragma once
+﻿#pragma once
 #include <Sig/Sig.hpp>
 #include "sigs.h"
+
+const char* logo = "_________  .__     .__                .__                    ________            \n \
+\\_   ___ \\ |  |__  |__|___  _______   |  |  _______  ___.__. \\_____  \\       \n \
+/    \\  \\/ |  |  \\ |  |\\  \\/ /\\__  \\  |  |  \\_  __ \\<   |  |  /  ____/  \n \
+\\     \\____|   Y  \\|  | \\   /  / __ \\_|  |__ |  | \\/ \\___  | /       \\   \n \
+ \\______  /|___|  /|__|  \\_/  (____  /|____/ |__|    / ____| \\_______ \\      \n \
+        \\/      \\/                 \\/                \\/              \\/     \n \
+ ____ ___                 .__             .__                     .___           \n \
+|    |   \\  ____    ____  |  |__  _____   |__|  ____    ____    __| _/          \n \
+|    |   / /    \\ _/ ___\\ |  |  \\ \\__  \\  |  | /    \\ _/ __ \\  / __ |     \n \
+|    |  / |   |  \\\\  \\___ |   Y  \\ / __ \\_|  ||   |  \\\\  ___/ / /_/ |     \n \
+|______/  |___|  / \\___  >|___|  /(____  /|__||___|  / \\___  >\\____ |         \n \
+               \\/      \\/      \\/      \\/          \\/      \\/      \\/     \n";
 
 // UE Types
 struct FString {
@@ -18,27 +31,6 @@ struct FString {
 struct GCGObj {
 	FString url_base;
 };
-
-long long FindSignature(HMODULE baseAddr, DWORD size, const char* title, const char* signature)
-{
-	const void* found = nullptr;
-	found = Sig::find(baseAddr, size, signature);
-	long long diff = 0;
-	if (found != nullptr)
-	{
-		diff = (long long)found - (long long)baseAddr;
-#ifdef _DEBUG
-		std::cout << title << ": 0x" << std::hex << diff << std::endl;
-#endif
-	}
-#ifdef _DEBUG
-	else
-		std::cout << title << ": nullptr" << std::endl;
-#endif
-
-	return diff;
-
-}
 
 // Helper functions
 
@@ -64,6 +56,29 @@ int logWideString(wchar_t* str) {
 	return i;
 }
 
+
+long long FindSignature(HMODULE baseAddr, DWORD size, const char* title, const char* signature)
+{
+	const void* found = nullptr;
+	found = Sig::find(baseAddr, size, signature);
+	long long diff = 0;
+	if (found != nullptr)
+	{
+		diff = (long long)found - (long long)baseAddr;
+#ifdef _DEBUG
+		//std::cout << title << ": 0x" << std::hex << diff << std::endl;
+		printf("?? -> %s : 0x%llx\n", title, diff);
+#endif
+	}
+#ifdef _DEBUG
+	else
+		printf("!! -> %s : nullptr\n", title);
+		//std::cout << title << ": nullptr" << std::endl;
+#endif
+
+		return diff;
+
+}
 // Hook macros
 
 HMODULE baseAddr;
@@ -75,8 +90,11 @@ MODULEINFO moduleInfo;
 	retType hk_##funcType args
 
 #define HOOK_ATTACH(moduleBase, funcType) \
-	MH_CreateHook(moduleBase + sig_##funcType, hk_##funcType, reinterpret_cast<void**>(&o_##funcType)); \
-	MH_EnableHook(moduleBase + sig_##funcType); 
+	MH_CreateHook(moduleBase + curBuild.offsets[F_##funcType], hk_##funcType, reinterpret_cast<void**>(&o_##funcType)); \
+	MH_EnableHook(moduleBase + curBuild.offsets[F_##funcType]); 
 
 #define HOOK_FIND_SIG(funcType) \
-	long long sig_##funcType = FindSignature(baseAddr, moduleInfo.SizeOfImage, #funcType, signatures[F_##funcType]);
+	if (curBuild.offsets[F_##funcType] == 0)\
+		curBuild.offsets[F_##funcType] = FindSignature(baseAddr, moduleInfo.SizeOfImage, #funcType, signatures[F_##funcType]); \
+	else printf("-> %s : (conf)\n", #funcType);
+	//long long sig_##funcType = FindSignature(baseAddr, moduleInfo.SizeOfImage, #funcType, signatures[F_##funcType]);

@@ -1,11 +1,51 @@
-#include <Windows.h>
+﻿#include <Windows.h>
 #include <Psapi.h>
 #include <MinHook/include/MinHook.h>
 #include <iostream>
 #include "include/main.h"
-
+#include "tiny-json/tiny-json.h"
+#include <deque>
+#include <fcntl.h>
+#include <io.h>
+#include <fstream>
+#include <iomanip>
 //#define TARGET_API_ROOT L"localhost"
 #define TARGET_API_ROOT L"servers.polehammer.net"
+
+#include <cstdint>
+#include <nmmintrin.h> // SSE4.2 intrinsics
+
+struct BuildType {
+	uint32_t fileHash = 0;
+	uint32_t buildId = 0;
+	uint32_t offsets[F_MaxFuncType] = {};
+	std::string name = "<unnamed>";
+};
+
+std::deque<BuildType*> configBuilds;
+
+uint32_t calculateCRC32(const std::string& filename) {
+	std::ifstream file(filename, std::ios::binary);
+	if (!file.is_open()) {
+		std::cerr << "Error opening file: " << filename << std::endl;
+		return 0;
+	}
+
+	uint32_t crc = 0; // Initial value for CRC-32
+
+	char buffer[4096];
+	while (file) {
+		file.read(buffer, sizeof(buffer));
+		std::streamsize bytesRead = file.gcount();
+
+		for (std::streamsize i = 0; i < bytesRead; ++i) {
+			crc = _mm_crc32_u8(crc, buffer[i]);
+		}
+	}
+
+	file.close();
+	return crc ^ 0xFFFFFFFF; // Final XOR value for CRC-32
+}
 
 DECL_HOOK(void*, GetMotd, (GCGObj* this_ptr, void* a2, void* a3, void* a4)) {
 	auto old_base = this_ptr->url_base;
@@ -67,39 +107,274 @@ DECL_HOOK(long long, IsNonPakFilenameAllowed, (void* this_ptr, void* InFilename)
 	return 1;
 }
 
+//FString* __cdecl
+//UUserFeedbackAndBugReportsLibrary::GetGameInfo(FString* __return_storage_ptr__, UWorld* param_1)
+DECL_HOOK(FString*, GetGameInfo, (FString* ret_ptr, void* uWorld))
+{
+	auto val = o_GetGameInfo(ret_ptr, uWorld);
+#ifdef _DEBUG
+	std::wcout << "GetGameInfo: " << *val->str << std::endl;
+#endif
+	return val;
+}
+
+//FViewport* __thiscall FViewport::FViewport(FViewport* this, FViewportClient* param_1)
+struct FViewport_C
+{
+	uint8_t ph[0x20];
+	FString AppVersionString;
+};
+
+// FIXME
+struct BuildInfo
+{
+	BuildInfo() {}
+	BuildInfo(const wchar_t* str, uint32_t id) //: buildStr(str), buildId(id) {}
+	{
+		size_t sz;
+		buildStr = (char*)malloc(128 * MB_CUR_MAX);
+		wcstombs_s(&sz, buildStr, 128 * MB_CUR_MAX, str, 127);
+		//std::cout << "parsed: " << buildStr << std::endl;
+		//wctomb(buildStr, *str);
+		buildId = id;
+	}
+	char * buildStr;
+	uint32_t buildId;
+};
+
+//BuildInfo* curBuildInfo = nullptr;
+BuildType curBuild;
+bool jsonDone = false;
+bool offsetsLoaded = false;
+bool needsSerialization = true;
+
+void serializeBuilds()
+{
+	char buff[2048];
+	char* dest = buff;
+	/*if (offsetsLoaded && curBuild == nullptr)
+	{
+		needsSerialization = false;
+		BuildType build;
+		build.name = "<unnamed>";
+		build.buildId = 0;
+		build.fileHash = 0;
+		curBuild = new BuildType(build);
+		log("unnamed init");
+	}*/
+	if (curBuild.buildId > 0)
+	{
+
+		char* pValue;
+		size_t len;
+		char ladBuff[512];
+		errno_t err = _dupenv_s(&pValue, &len, "LOCALAPPDATA");
+		strncpy_s(ladBuff, 256, pValue, len);
+		strncpy_s(ladBuff + len - 1, 256 - len, "\\Chivalry 2\\Saved\\Config\\c2uc.builds.json", 42);
+
+		/*for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+			curBuild.offsets[i] = addrOffsets[i];*/
+
+		log(ladBuff);
+		std::ofstream out(ladBuff);
+		/*out << "{\n\"" << curBuildInfo->buildStr << "\": {";
+		out << "\n\"Build\" : " << curBuildInfo->buildId;
+		out << ",\n\"FileHash\" : " << calculateCRC32("Chivalry2-Win64-Shipping.exe");
+		for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+			out << ",\n\"" << strFunc[i] << "\": " << addrOffsets[i];*/
+
+		out << "\n{\n\"" << curBuild.name << "\": {";
+		out << "\n\"Build\" : " << curBuild.buildId;
+		out << ",\n\"FileHash\" : " << curBuild.fileHash;
+		for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+			out << ",\n\"" << strFunc[i] << "\": " << curBuild.offsets[i];
+
+		for (auto build : configBuilds)
+		{
+			out << "\n},\n\"" << build->name << "\": {";
+			out << "\n\"Build\" : " << build->buildId;
+			out << ",\n\"FileHash\" : " << build->fileHash;
+			for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+				out << ",\n\"" << strFunc[i] << "\": " << build->offsets[i];
+		}
+		out << "\n}";
+		out << "\n}";
+
+	}
+
+}
+
+DECL_HOOK(FString*, FViewport, (FViewport_C* this_ptr, void* viewportClient))
+{
+	auto val = o_FViewport(this_ptr, viewportClient);
+	wchar_t* buildNr = wcschr(this_ptr->AppVersionString.str, L'+') + 1;
+	if (buildNr != nullptr)
+	{
+		uint32_t buildId = _wtoi(buildNr);
+		if (curBuild.buildId == 0)
+		{
+			needsSerialization = true;
+			auto bi = new BuildInfo(this_ptr->AppVersionString.str + 7, buildId); // FIXME
+
+			curBuild.name = bi->buildStr;
+			curBuild.buildId = buildId;
+			curBuild.fileHash = calculateCRC32("Chivalry2-Win64-Shipping.exe");
+			/*for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+				curBuild.offsets[i] = addrOffsets[i];*/
+			//curBuild = new BuildType(build);
+			log("Viewport constructor!");
+			if (offsetsLoaded)
+				serializeBuilds();
+		}
+		/*else if (curBuild && curBuild->buildId == 0)
+		{ }*/
+		else
+			log("Viewport constructor! (loaded)");
+			
+			
+
+#ifdef _DEBUG
+		std::wcout << this_ptr->AppVersionString.str << ": " << buildNr << " " << buildId << std::endl;
+#endif
+	}
+	return val;
+}
+
+int LoadBuildConfig()
+{
+	// load config file
+	char* pValue;
+	size_t len;
+	char ladBuff[256];
+	errno_t err = _dupenv_s(&pValue, &len, "LOCALAPPDATA");
+	strncpy_s(ladBuff, 256, pValue, len);
+	strncpy_s(ladBuff + len - 1, 256 - len, "\\Chivalry 2\\Saved\\Config\\c2uc.builds.json", 42);
+
+	std::ifstream file(ladBuff, std::ios::binary);
+	if (!file.is_open()) {
+		std::cout << "Error opening build config" << std::endl;
+		return 0;
+	}
+	std::string buffer;
+	file.seekg(0, std::ios::end);
+	buffer.reserve(file.tellg());
+	file.seekg(0, std::ios::beg);
+
+	buffer.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	file.close();
+
+	// parse json
+	json_t mem[2048];
+	const json_t* json = json_create(const_cast<char*>(buffer.c_str()), mem, 2048);
+
+	if (!json) {
+		puts("Failed to create json parser");
+		return EXIT_FAILURE;
+	}
+	uint32_t curFileHash = calculateCRC32("Chivalry2-Win64-Shipping.exe");
+
+	json_t const* buildEntry;
+	needsSerialization = true;
+	for (buildEntry = json_getChild(json); buildEntry != 0; buildEntry = json_getSibling(buildEntry)) {
+		if (JSON_OBJ == json_getType(buildEntry)) {
+
+			char const* fileSize = json_getPropertyValue(buildEntry, "FileSize");
+			json_t const* build = json_getProperty(buildEntry, "Build");
+			char const* buildName = json_getName(buildEntry);
+			printf("parsing %s\n", buildName);
+
+			json_t const* fileHash = json_getProperty(buildEntry, "FileHash");
+			if (!fileHash || JSON_INTEGER != json_getType(fileHash)) {
+				puts("Error, the fileHash property is not found.");
+				return EXIT_FAILURE;
+			}
+
+			uint64_t fileHashVal = json_getInteger(fileHash);
+			bool hashMatch = fileHashVal == curFileHash;
+
+			if (hashMatch)
+			{
+				needsSerialization = false;
+				printf("Hash match (0x%llx) Build: %s\n", fileHashVal, buildName);
+			}
+
+			BuildType bd;
+			bd.name = std::string(buildName);
+			bd.buildId = (uint32_t)json_getInteger(build);
+			bd.fileHash = (uint32_t)fileHashVal;
+			for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+			{
+				if (const json_t* GetMotd_j = json_getProperty(buildEntry, strFunc[i]))
+				{
+					if (JSON_INTEGER == json_getType(GetMotd_j))
+						if (uint32_t offsetVal = (uint32_t)json_getInteger(GetMotd_j))
+							bd.offsets[i] = offsetVal;
+				}
+				else if (hashMatch) needsSerialization = true;
+			}
+
+			if (hashMatch)
+				curBuild = bd;
+			else
+				configBuilds.push_back(new BuildType(bd));
+		}
+	}
+}
+
+
+
 unsigned long main_thread(void* lpParameter) {
-	log("BrowserPlugin started!");
+	log(logo);
+	log("Chivalry 2 Unchained");
 	MH_Initialize();
 	// https://github.com/HoShiMin/Sig
 	const void* found = nullptr;
 	//found = Sig::find(buf, size, "11 22 ? 44 ?? 66 AA bb cC Dd");
 	//HMODULE var = GetModuleHandle(NULL);
 	//GetModuleInformation(GetCurrentProcess(), var, &moduleInfo, sizeof(moduleInfo));
+	LoadBuildConfig();
 	baseAddr = GetModuleHandleA("Chivalry2-Win64-Shipping.exe");
+	//cerTest();
+	//std::cout << std::hex << calculateCRC32("Chivalry2-Win64-Shipping.exe") << std::endl;
+	int file_descript;
+	//unsigned long file_size;
+	errno_t err = _sopen_s(&file_descript, "Chivalry2-Win64-Shipping.exe", O_RDONLY, _SH_DENYNO, 0);
+	if (err)
+		std::cout << "error " << err << std::endl;
+
+	// Get the size of the file
+	off_t file_size = _filelength(file_descript);
+
+	//file_size = get_size_by_fd(file_descript);
+	/*printf("file size:\t%lu\n", file_size);*/
+
 	//MODULEINFO moduleInfo;	
 	GetModuleInformation(GetCurrentProcess(), baseAddr, &moduleInfo, sizeof(moduleInfo));
 
-	std::cout << "MINFO: " << moduleInfo.SizeOfImage << " " << moduleInfo.EntryPoint << std::endl;
-	
+	//std::cout << "MINFO: " << moduleInfo.SizeOfImage << " " << moduleInfo.EntryPoint << std::endl;
+
+	//uint32_t crc = crc32c_append(0, (uint8_t *)baseAddr, moduleInfo.SizeOfImage);
 
 	unsigned char* module_base{ reinterpret_cast<unsigned char*>(baseAddr) };
 
-	HOOK_FIND_SIG(GetMotd);
-	HOOK_FIND_SIG(GetCurrentGames);
-	HOOK_FIND_SIG(SendRequest);
-	HOOK_FIND_SIG(IsNonPakFilenameAllowed);
-	HOOK_FIND_SIG(FindFileInPakFiles_1);
-	HOOK_FIND_SIG(FindFileInPakFiles_2);
-	HOOK_FIND_SIG(UTBLLocalPlayer_Exec);
+	for (uint8_t i = 0; i < F_MaxFuncType; ++i)
+	{
+		if (curBuild.offsets[i] == 0)
+			curBuild.offsets[i] = FindSignature(baseAddr, moduleInfo.SizeOfImage, strFunc[i], signatures[i]);
+		else printf("ok -> %s : (conf)\n", strFunc[i]);
+		if (i == F_FViewport)
+		{
+			HOOK_ATTACH(module_base, FViewport);
+		}
+	}
 
-	//auto sig_SendRequest = FindSignature(baseAddr, moduleInfo.SizeOfImage, "SendRequest", "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 40 48 8B D9 49 8B F9");
-	//auto sig_GetMotd = FindSignature(baseAddr, moduleInfo.SizeOfImage, "GetMotd", "4C 89 4C 24 ?? 4C 89 44 24 ?? 48 89 4C 24 ?? 55 56 57 41 54 48 8D 6C 24 ?? 48 81 EC D8 00 00 00 83 79 ?? 01 4C 8B E2 48 8B F9 7F ?? 33 F6 48 8B C2 48 89 32 48 89 72 ?? 48 81 C4 D8 00 00 00 41 5C 5F 5E 5D C3 48 89 9C 24 ?? ?? ?? ?? 48 8D 55 ?? 4C 89 AC 24 ?? ?? ?? ?? 4C 89 B4 24 ?? ?? ?? ?? 4C 89 BC 24 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B 6D ?? 48 8D 4D ?? 33 F6 48 89 75 ?? 48 89 75 ?? 49 8B 45 00 8D 56 ?? 48 8B 40 ?? 48 89 45 ?? E8 ?? ?? ?? ?? 8B 55 ?? 8D 5A ?? 89 5D ?? 3B 5D ?? 7E ?? 48 8D 4D ?? E8 ?? ?? ?? ?? 8B 5D ?? 4C 8B 75 ?? 48 8D 15 ?? ?? ?? ?? 49 8B CE 41 B8 12 00 00 00");
-	//auto sig_GetCurrentGames = FindSignature(baseAddr, moduleInfo.SizeOfImage, "GetCurrentGames", "4C 89 4C 24 ?? 4C 89 44 24 ?? 48 89 4C 24 ?? 55 56 57 41 54 48 8D 6C 24 ?? 48 81 EC D8 00 00 00 83 79 ?? 01 4C 8B E2 48 8B F9 7F ?? 33 F6 48 8B C2 48 89 32 48 89 72 ?? 48 81 C4 D8 00 00 00 41 5C 5F 5E 5D C3 48 89 9C 24 ?? ?? ?? ?? 48 8D 55 ?? 4C 89 AC 24 ?? ?? ?? ?? 4C 89 B4 24 ?? ?? ?? ?? 4C 89 BC 24 ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B 6D ?? 48 8D 4D ?? 33 F6 48 89 75 ?? 48 89 75 ?? 49 8B 45 00 8D 56 ?? 48 8B 40 ?? 48 89 45 ?? E8 ?? ?? ?? ?? 8B 55 ?? 8D 5A ?? 89 5D ?? 3B 5D ?? 7E ?? 48 8D 4D ?? E8 ?? ?? ?? ?? 8B 5D ?? 4C 8B 75 ?? 48 8D 15 ?? ?? ?? ?? 49 8B CE 41 B8 22 00 00 00 E8 ?? ?? ?? ?? 8B 4F ?? 83 F9 01 7F ?? 4D 8B FE 4C 8B F6 EB ?? 85 DB 74 ?? 44 8D 7B ?? 41 8B C7 EB ?? 44 8B FE 8B C6 48 8B 5D ?? 8D 14 ?? 48 8B F9 48 89 75 ?? 45 33 C0 89 7D ?? 48 8D 4D ?? 48 8B 1B E8 ?? ?? ?? ?? 48 8B 4D ?? 4C 8D 04 ?? 48 8B D3 E8 ?? ?? ?? ?? 45 8B C7 48 8D 4D ?? 49 8B D6 E8 ?? ?? ?? ?? 4C 8B 7D ?? 8B 5D ?? 48 89 75 ?? 48 89 75 ?? 48 89 75 ?? 8B D6 89 55 ?? 8B CE 89 4D ?? 85 DB 74 ?? 49 8B FF 4D 85 FF 74 ?? EB ?? 48 8D 3D ?? ?? ?? ?? 66 39 37 74 ?? 48 C7 C3 FF FF FF FF 48 FF C3 66 39 34 ?? 75 ?? FF C3 85 DB 7E ?? 8B D3 48 8D 4D ?? E8 ?? ?? ?? ?? 8B 4D ?? 8B 55 ?? 8D 04 ?? 89 45 ?? 3B C1 7E ?? 48 8D 4D ?? E8 ?? ?? ?? ?? 48 8B 4D ?? 48 8B D7 4C 63 C3 4D 03 C0 E8 ?? ?? ?? ?? 48 8D 55 ?? 49 8B CD FF 55 ?? 48 8B 4D ?? 48 85 C9 74 ?? E8 ?? ?? ?? ?? 4D 85 FF 74 ?? 49 8B CF E8 ?? ?? ?? ?? 4D 85 F6 74 ?? 49 8B CE E8 ?? ?? ?? ?? 4C 8B 75 ?? 8B CE 49 83 C6 10 89 4D ?? 45 8B 56 ?? 49 8D 7E ?? C7 45 ?? 01 00 00 00 44 8B C6 48 89 7D ?? 41 BB 1F 00 00 00 C7 45 ?? FF FF FF FF 48 89 75 ?? 45 85 D2 74 ?? 48 8B 47 ?? 4C 8B CF 48 85 C0 4C 0F 45 C8 41 8D 42 ?? 99 41 23 D3 8D 1C ?? 41 8B 11 C1 FB 05 85 D2 75 ?? 0F 1F 80 00 00 00 00 FF C1 41 83 C0 20 89 4D ?? 44 89 45 ?? 3B CB 7F ?? 48 63 C1 C7 45 ?? FF FF FF FF 41 8B 14 ?? 85 D2 74 ?? 8B C2 F7 D8 23 C2 0F BD C8 89 45 ?? 74 ?? 41 8B C3 2B C1 EB ?? B8 20 00 00 00 44 2B C0 41 8D 40 ?? 89 45 ?? 41 3B C2 7E ?? 44 89 55 ?? 41 8B 56 ?? 41 BD FF FF FF FF 0F 10 55 ?? 8B CA 4C 89 75 ?? 0F 10 45 ?? 41 23 CB 44 8B C2 0F 11 55 ?? 41 D3 E5 44 8B CA 0F 11 45 ?? 41 C1 F8 05 41 83 E1 E0 66 0F 15 D2 45 8B FA F2 0F 11 55 ?? 44 89 6D ?? 89 55 ?? 0F 10 45 ?? 0F 10 4D ?? 0F 11 45 ?? 0F 11 4D ?? 41 3B D2 74 ?? 48 8B 47 ?? 4C 8B D7 48 85 C0 49 63 C8 4C 0F 45 D0 41 8D 47 ?? 99 41 23 D3 8D 1C ?? 41 8B 14 ?? C1 FB 05 41 23 D5 75 ?? 41 FF C0 41 83 C1 20 44 3B C3 7F ?? 49 63 C0 C7 45 ?? FF FF FF FF 41 8B 14 ?? 85 D2 74 ?? 8B C2 F7 D8 23 C2 0F BD C8 74 ?? 44 2B D9 EB ?? 41 BB 20 00 00 00 45 2B CB 41 8D 41 ?? 89 45 ?? 41 3B C7 7E ?? 44 89 7D ?? 48 8B 5D ?? 4C 8B BC 24 ?? ?? ?? ?? 4C 8B AC 24 ?? ?? ?? ?? 48 C1 EB 20 48 63 45 ?? 48 8B 55 ?? 3B C3 75 ?? 48 39 7D ?? 75 ?? 49 3B D6 74 ?? 48 8D 0C ?? 48 8B 02 48 8D 14 ?? 48 8B 4D ?? 4C 8D 42 ?? 48 8B 01 FF 50 ?? 8B 45 ?? 48 8D 4D ?? F7 D0 21 45 ?? E8 ?? ?? ?? ?? EB ?? 48 8B 4D ?? 48 8D 55 ?? E8 ?? ?? ?? ?? 48 8B 4D ?? 48 8B 01 FF 90 ?? ?? ?? ?? 4C 8B B4 24 ?? ?? ?? ?? 4C 8D 45 ?? 48 8B D8 48 8B CE 48 8B 45 ?? 8B D6 48 89 4D ?? 89 55 ?? 49 3B C0 74 ?? 39 48 ?? 74 ?? 4C 8B 00 4D 85 C0 74 ?? 49 8B 00 48 8D 55 ?? 49 8B C8 FF 50 ?? 8B 55 ?? 48 8B 4D ?? 48 89 75 ?? 89 75 ?? 85 D2 74 ?? 48 85 C9 74 ?? 48 8B 01 48 8D 55 ?? FF 50 ?? 48 8B 55 ?? 4C 8D 4D ?? 4C 8D 05 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? 48 8B D0 48 8B CB E8 ?? ?? ?? ?? 39 75 ?? 74 ?? 48 8B 4D ?? 48 85 C9 74 ?? 48 8B 01 33 D2 FF 50 ?? 48 8B 45 ?? 48 85 C0 74 ?? 45 33 C0 33 D2 48 8B C8 E8 ?? ?? ?? ?? 48 89 45 ?? 89 75 ?? EB ?? 48 8B 45 ?? 48 85 C0 74 ?? 48 8B C8 E8 ?? ?? ?? ?? 8B 45 ?? 48 8B 4D ?? 85 C0 74 ?? 48 85 C9 75 ?? 85 C0 74 ?? 48 85 C9 74 ?? 48 8B 01 33 D2 FF 50 ?? 48 8B 4D ?? 48 85 C9 74 ?? 45 33 C0 33 D2 E8 ?? ?? ?? ?? 48 8B C8 48 89 45 ?? 89 75 ?? 48 85 C9 74 ?? E8 ?? ?? ?? ?? 48 8B 4D ?? 48 8B 01 FF 90 ?? ?? ?? ?? 48 8B 45 ?? 49 89 04 24 48 8B 45 ?? 49 89 44 24 ?? 48 85 C0 74 ?? FF 40 ?? 48 8B 5D ?? 48 85 DB 74 ?? 83 6B ?? 01 75 ?? 48 8B 03 48 8B CB FF 10 83 6B ?? 01 75 ?? 48 8B 03 BA 01 00 00 00 48 8B CB FF 50 ?? 48 8B 9C 24 ?? ?? ?? ?? 49 8B C4 48 81 C4 D8 00 00 00 41 5C 5F 5E 5D C3");
-	//auto sig_IsNonPakFilenameAllowed = FindSignature(baseAddr, moduleInfo.SizeOfImage, "IsNonPakFilenameAllowed", "48 89 5C 24 ?? 48 89 6C 24 ?? 56 57 41 56 48 83 EC 30 48 8B F1 45 33 C0");
-	//auto sig_FindFileInPakFiles_1 = FindSignature(baseAddr, moduleInfo.SizeOfImage, "FindFileInPakFiles_1", "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 41 54 41 55 41 56 41 57 48 83 EC 30 33 FF");
-	//auto sig_FindFileInPakFiles_2 = FindSignature(baseAddr, moduleInfo.SizeOfImage, "FindFileInPakFiles_2", "48 8B C4 4C 89 48 ?? 4C 89 40 ?? 48 89 48 ?? 55 53 48 8B EC");
-	//auto sig_UTBLLocalPlayer =FindSignature(baseAddr, moduleInfo.SizeOfImage, "UTBLLocalPlayer::Exec", "75 1A 45 84 ED 75 15 48 85 F6 74 10 40 38 BE ? ? ? ? 74 07 32 DB E9 ? ? ? ? 48 8B 5D 60 49 8B D6 4C 8B 45 58 4C 8B CB 49 8B CF");
 
+
+	char buff[512];
+	char* dest = buff;
+
+	offsetsLoaded = true;
+	serializeBuilds();
 	// official
 	//auto sig_SendRequest= 0x14a1250;
 	//auto sig_GetMotd = 0x13da7d0;
@@ -118,16 +393,18 @@ unsigned long main_thread(void* lpParameter) {
 	//auto sig_FindFileInPakFiles_2 = 0x2f49320;
 	//auto sig_UTBLLocalPlayer = 0x1924926;
 
+	//HOOK_ATTACH(module_base, FViewport);
 	HOOK_ATTACH(module_base, GetMotd);
 	HOOK_ATTACH(module_base, GetCurrentGames);
 	HOOK_ATTACH(module_base, SendRequest);
 	HOOK_ATTACH(module_base, IsNonPakFilenameAllowed);
 	HOOK_ATTACH(module_base, FindFileInPakFiles_1);
 	HOOK_ATTACH(module_base, FindFileInPakFiles_2);
+	HOOK_ATTACH(module_base, GetGameInfo);
 
 
 	// ServerPlugin
-	auto cmd_permission{ module_base + sig_UTBLLocalPlayer_Exec }; // Patch for command permission when executing commands (UTBLLocalPlayer::Exec)
+	auto cmd_permission{ module_base + curBuild.offsets[F_UTBLLocalPlayer_Exec] }; // Patch for command permission when executing commands (UTBLLocalPlayer::Exec)
 
 	// 75 1A 45 84 ED 75 15 48 85 F6 74 10 40 38 BE ? ? ? ? 74 07 32 DB E9 ? ? ? ? 48 8B 5D 60 49 8B D6 4C 8B 45 58 4C 8B CB 49 8B CF (Points directly to instruction: first JNZ)
 
