@@ -143,6 +143,15 @@ DECL_HOOK(FString*, GetGameInfo, (FString* ret_ptr, void* uWorld))
 	return val;
 }
 
+
+DECL_HOOK(bool, LoadFrontEndMap, (void * this_ptr, FString* param_1))
+{
+	/*std::wstring ws(param_1->str);
+	std::string nameStr = std::string(ws.begin(), ws.end());
+	printf("LoadFrontEndMap: %s %d\n", nameStr.c_str(), param_1->max_letters);*/
+	return o_LoadFrontEndMap(this_ptr, new FString(L"/Game/Mods/ArgonSDK/Mods/AgMods?map=Frontend?mods=ModMenu"));
+}
+
 //BuildInfo* curBuildInfo = nullptr;
 BuildType curBuild;
 bool jsonDone = false;
@@ -387,6 +396,7 @@ unsigned long main_thread(void* lpParameter) {
 	HOOK_ATTACH(module_base, FindFileInPakFiles_1);
 	HOOK_ATTACH(module_base, FindFileInPakFiles_2);
 	HOOK_ATTACH(module_base, GetGameInfo);
+	HOOK_ATTACH(module_base, LoadFrontEndMap);
 
 
 	// ServerPlugin
