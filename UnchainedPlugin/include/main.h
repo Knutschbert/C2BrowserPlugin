@@ -1,70 +1,14 @@
-﻿#pragma once
-#include <Sig/Sig.hpp>
+﻿// TODO: remove this file entirely. The concept of a main.h
+// is nonsensical from an organization persepctive
+
+#pragma once
+#include <Sig.hpp>
+// TODO: this include gives HMODULE and stuff, for when this file eventually gets
+// deleted and its contents moved elsewhere
+//#include <windows.h> 
 #include "sigs.h"
 
-const char* logo = R"( 
-_________  .__     .__                .__                    ________             
-\_   ___ \ |  |__  |__|___  _______   |  |  _______  ___.__. \_____  \        
-/    \  \/ |  |  \ |  |\  \/ /\__  \  |  |  \_  __ \<   |  |  /  ____/   
-\     \____|   Y  \|  | \   /  / __ \_|  |__ |  | \/ \___  | /       \    
- \______  /|___|  /|__|  \_/  (____  /|____/ |__|    / ____| \_______ \       
-        \/      \/                 \/                \/              \/      
- ____ ___                 .__             .__                     .___            
-|    |   \  ____    ____  |  |__  _____   |__|  ____    ____    __| _/           
-|    |   / /    \ _/ ___\ |  |  \ \__  \  |  | /    \ _/ __ \  / __ |      
-|    |  / |   |  \\  \___ |   Y  \ / __ \_|  ||   |  \\  ___/ / /_/ |      
-|______/  |___|  / \___  >|___|  /(____  /|__||___|  / \___  >\____ |          
-               \/      \/      \/      \/          \/      \/      \/      
-)";
-
-// UE Types
-struct FString {
-	FString(const wchar_t* str) {
-		this->letter_count = lstrlenW(str) + 1;
-		this->max_letters = this->letter_count;
-		this->str = const_cast<wchar_t*>(str);
-	}
-
-	wchar_t* str;
-	int letter_count;
-	int max_letters;
-};
-
-//FViewport* __thiscall FViewport::FViewport(FViewport* this, FViewportClient* param_1)
-struct FViewport_C
-{
-	uint8_t ph[0x20];
-	FString AppVersionString;
-};
-
-struct GCGObj {
-	FString url_base;
-};
-
 // Helper functions
-
-void log(const char* str) {
-#ifndef _DEBUG
-	return;
-#endif
-	std::cout << str << std::endl;
-
-}
-
-int logWideString(wchar_t* str) {
-#ifndef _DEBUG
-	return 0;
-#endif
-	int i = 0;
-	while (*(char*)str != 0) {
-		std::cout << *(char*)str;
-		str += 2;
-		i++;
-	}
-	std::cout << std::endl;
-	return i;
-}
-
 
 long long FindSignature(HMODULE baseAddr, DWORD size, const char* title, const char* signature)
 {
@@ -74,12 +18,12 @@ long long FindSignature(HMODULE baseAddr, DWORD size, const char* title, const c
 	if (found != nullptr)
 	{
 		diff = (long long)found - (long long)baseAddr;
-#ifdef _DEBUG
+#ifndef NDEBUG
 		//std::cout << title << ": 0x" << std::hex << diff << std::endl;
 		printf("?? -> %s : 0x%llx\n", title, diff);
 #endif
 	}
-#ifdef _DEBUG
+#ifndef NDEBUG
 	else
 		printf("!! -> %s : nullptr\n", title);
 		//std::cout << title << ": nullptr" << std::endl;
@@ -88,6 +32,23 @@ long long FindSignature(HMODULE baseAddr, DWORD size, const char* title, const c
 		return diff;
 
 }
+
+inline static void Ptch_Nop(unsigned char* address, int size)
+{
+	unsigned long protect[2];
+	VirtualProtect((void*)address, size, PAGE_EXECUTE_READWRITE, &protect[0]);
+	memset((void*)address, 0x90, size);
+	VirtualProtect((void*)address, size, protect[0], &protect[1]);
+}
+
+inline static void Ptch_Repl(unsigned char* address, DWORD newVal)
+{
+	DWORD d;
+	VirtualProtect((void*)address, 1, PAGE_EXECUTE_READWRITE, &d);
+	*address = 0xEB; // Patch to JMP
+	VirtualProtect((void*)address, 1, d, NULL);
+}
+
 // Hook macros
 
 HMODULE baseAddr;

@@ -1,329 +1,153 @@
-#include <Windows.h>
-#include <Psapi.h>
-#include <MinHook/include/MinHook.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <psapi.h>
+#include <MinHook.h>
 #include <iostream>
-#include "include/main.h"
-#include "tiny-json/tiny-json.h"
-#include <deque>
 #include <fcntl.h>
 #include <io.h>
 #include <fstream>
-#include <iomanip>
-//#define TARGET_API_ROOT L"localhost"
-#define TARGET_API_ROOT L"servers.polehammer.net"
-#ifdef _DEBUG
-	#define PROTOCOL L"http"
-#else
-	#define PROTOCOL L"https"
-#endif
+#include <string>
 
-#include <cstdint>
-#include <nmmintrin.h> // SSE4.2 intrinsics
+#include <direct.h>
 
-struct BuildType {
-	~BuildType() {
-		delete[] name;
+//always open output window
+//#define _DEBUG
+#include "constants.h"
+#include "main.h"
+#include "Chivalry2.h"
+#include "UE4.h"
+#include "logging.h"
+#include "nettools.h"
+#include "commandline.h"
+#include "builds.h" 
+
+//black magic for the linker to get winsock2 to work
+//TODO: properly add this to the linker settings
+#pragma comment(lib, "Ws2_32.lib")
+
+// hooks
+// TODO? figure out a better/cleaner way to do this
+#include "backendHooks.h"
+#include "ownershipOverrides.h"
+#include "assetLoading.h"
+#include "unchainedIntegration.h"
+#include "adminControl.h"
+#include "etcHooks.h"
+
+// end hooks
+
+// parse the command line for the rcon flag, and return the port specified
+// if not port was specified, or the string that was supposed to be a port number 
+// was invalid, then -1 is returned
+// TODO: swap this out for more generalized commandline parsing introduced in commandline.h
+int parsePortParams(std::wstring commandLine, size_t flagLoc) {
+	size_t portStart = commandLine.find(L" ", flagLoc); //next space
+	if (portStart == std::wstring::npos) {
+		return -1;
 	}
+	size_t portEnd = commandLine.find(L" ", portStart + 1); //space after that
 
-	void SetName(const char* newName) {
-		nameStr = std::string(newName);
+	std::wstring port = portEnd != std::wstring::npos
+		? commandLine.substr(portStart, portEnd - portStart)
+		: commandLine.substr(portStart);
+
+	//log("found port:");
+	//logWideString(const_cast<wchar_t*>(port.c_str()));
+	try {
+		return std::stoi(port);
 	}
-
-	void SetName(const wchar_t* newName) {
-
-		std::wstring ws(newName);
-		nameStr = std::string(ws.begin(), ws.end());
-
+	catch (std::exception e) {
+		return -1;
 	}
-
-	uint32_t fileHash = 0;
-	uint32_t buildId = 0;
-	uint32_t offsets[F_MaxFuncType] = {};
-	std::string nameStr = "";
-private:
-	char* name = nullptr;
-};
-
-std::deque<BuildType*> configBuilds;
-
-uint32_t calculateCRC32(const std::string& filename) {
-	std::ifstream file(filename, std::ios::binary);
-	if (!file.is_open()) {
-		std::cerr << "Error opening file: " << filename << std::endl;
-		return 0;
-	}
-
-	uint32_t crc = 0; // Initial value for CRC-32
-
-	char buffer[4096];
-	while (file) {
-		file.read(buffer, sizeof(buffer));
-		std::streamsize bytesRead = file.gcount();
-
-		for (std::streamsize i = 0; i < bytesRead; ++i) {
-			crc = _mm_crc32_u8(crc, buffer[i]);
-		}
-	}
-
-	file.close();
-	return crc ^ 0xFFFFFFFF; // Final XOR value for CRC-32
 }
 
-DECL_HOOK(void*, GetMotd, (GCGObj* this_ptr, void* a2, void* a3, void* a4)) {
-	auto old_base = this_ptr->url_base;
-	this_ptr->url_base = FString( PROTOCOL L"://" TARGET_API_ROOT L"/api/tbio");
-	void* res = o_GetMotd(this_ptr, a2, a3, a4);
+void handleRCON() {
+	MH_Initialize();
 
-	this_ptr->url_base = old_base;
-	log("GetMotd returned");
-	return res;
-}
-
-DECL_HOOK(void*, GetCurrentGames, (GCGObj* this_ptr, void* a2, void* a3, void* a4)) {
-	log("GetCurrentGames called");
-	auto old_base = this_ptr->url_base;
-
-	this_ptr->url_base = FString( PROTOCOL L"://" TARGET_API_ROOT "/api/tbio" );
-	void* res{ o_GetCurrentGames(this_ptr, a2, a3, a4) };
-
-	this_ptr->url_base = old_base;
-	log("GetCurrentGames returned");
-	return res;
-}
-
-DECL_HOOK(void*, SendRequest, (GCGObj* this_ptr, FString* a2, FString* a3, FString* a4, FString* a5)) {
-
-	if (a2->letter_count > 0 &&
-		wcscmp(L"https://EBF8D.playfabapi.com/Client/Matchmake?sdk=Chiv2_Version", a2->str) == 0)
-	{
-		FString original = *a2; //save original string and buffer information
-		*a2 = FString( PROTOCOL L"://" TARGET_API_ROOT "/api/playfab/Client/Matchmake"); //overwrite with new string
-		log("hk_SendRequest Client/Matchmake");
-		auto res = o_SendRequest(this_ptr, a2, a3, a4, a5); //run the request as normal with new string
-		*a2 = original; //set everything back to normal and pretend nothing happened
-		return res;
-	}
-	return o_SendRequest(this_ptr, a2, a3, a4, a5);
-}
-
-// AssetLoaderPlugin
-
-DECL_HOOK(long long, FindFileInPakFiles_1, (void* this_ptr, const wchar_t* Filename, void** OutPakFile, void* OutEntry)) {
-	auto attr{ GetFileAttributesW(Filename) };
-	if (attr != INVALID_FILE_ATTRIBUTES && Filename && wcsstr(Filename, L"../../../")) {
-		if (OutPakFile) OutPakFile = nullptr;
-		return 0;
+	std::wstring commandLine = GetCommandLineW();
+	size_t flagLoc = commandLine.find(L"-rcon");
+	if (flagLoc == std::wstring::npos) {
+		ExitThread(0);
+		return;
 	}
 
-	return o_FindFileInPakFiles_1(this_ptr, Filename, OutPakFile, OutEntry);
-}
+	log("[RCON]: Found -rcon flag. RCON will be enabled.");
 
-DECL_HOOK(long long, FindFileInPakFiles_2, (void* this_ptr, const wchar_t* Filename, void** OutPakFile, void* OutEntry)) {
-	auto attr{ GetFileAttributesW(Filename) };
-	if (attr != INVALID_FILE_ATTRIBUTES && Filename && wcsstr(Filename, L"../../../")) {
-		if (OutPakFile) OutPakFile = nullptr;
-		return 0;
+	int port = parsePortParams(commandLine, flagLoc);
+	if (port == -1) {
+		port = 9001; //default port
 	}
 
-	return o_FindFileInPakFiles_2(this_ptr, Filename, OutPakFile, OutEntry);
-}
+	WSADATA wsaData;
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+		log("[RCON][FATAL]: Failed to initialize Winsock!");
+		ExitThread(0);
+		return;
+	}
 
-DECL_HOOK(long long, IsNonPakFilenameAllowed, (void* this_ptr, void* InFilename)) {
-	return 1;
-}
+	log((std::string("[RCON][INFO]: Opening RCON server socket on TCP/") + std::to_string(port)).c_str());
 
-//FString* __cdecl
-//UUserFeedbackAndBugReportsLibrary::GetGameInfo(FString* __return_storage_ptr__, UWorld* param_1)
-DECL_HOOK(FString*, GetGameInfo, (FString* ret_ptr, void* uWorld))
-{
-	auto val = o_GetGameInfo(ret_ptr, uWorld);
-#ifdef _DEBUG
-	std::wcout << "GetGameInfo: " << *val->str << std::endl;
-#endif
-	return val;
-}
+	SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-//BuildInfo* curBuildInfo = nullptr;
-BuildType curBuild;
-bool jsonDone = false;
-bool offsetsLoaded = false;
-bool needsSerialization = true;
+	sockaddr_in addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
-void serializeBuilds()
-{
-	char buff[2048];
-	char* dest = buff;
-	if (curBuild.buildId > 0)
-	{
+	bind(listenSock, (sockaddr*)&addr, sizeof(addr));
+	listen(listenSock, SOMAXCONN);
 
-		char* pValue;
-		size_t len;
-		char ladBuff[512];
-		errno_t err = _dupenv_s(&pValue, &len, "LOCALAPPDATA");
-		if (err != 0)
+
+	while (true) {
+		//set up a new command string
+		auto command = std::make_unique<std::wstring>();
+		log("[RCON]: Waiting for command");
+		//get a command from a socket
+		int addrLen = sizeof(addr);
+		SOCKET remote = accept(listenSock, (sockaddr*)&addr, &addrLen);
+		log("[RCON]: Accepted connection");
+		if (remote == INVALID_SOCKET) {
+			log("[RCON][FATAL]: invalid socket error");
 			return;
-		strncpy_s(ladBuff, 512 * sizeof(char), pValue, len);
-		strncpy_s(ladBuff + len - 1, 256 - len, "\\Chivalry 2\\Saved\\Config\\c2uc.builds.json", 42);
-
-		printf("Config written to:\n\t%s\n", ladBuff);
-		std::ofstream out(ladBuff);
-
-		out << "\n{\n\"" << ((curBuild.nameStr.length() > 0) ? curBuild.nameStr.c_str() : "") << "\": {";
-		out << "\n\"Build\" : " << curBuild.buildId;
-		out << ",\n\"FileHash\" : " << curBuild.fileHash;
-		for (uint8_t i = 0; i < F_MaxFuncType; ++i)
-			out << ",\n\"" << strFunc[i] << "\": " << curBuild.offsets[i];
-
-		for (auto build : configBuilds)
-		{
-			out << "\n},\n\"" << ((build->nameStr.length() > 0) ? build->nameStr.c_str() : "") << "\": {";
-			out << "\n\"Build\" : " << build->buildId;
-			out << ",\n\"FileHash\" : " << build->fileHash;
-			for (uint8_t i = 0; i < F_MaxFuncType; ++i)
-				out << ",\n\"" << strFunc[i] << "\": " << build->offsets[i];
 		}
-		out << "\n}";
-		out << "\n}";
+		const int BUFFER_SIZE = 256;
+		//create one-filled buffer
+		char buffer[BUFFER_SIZE + 1];
+		for (int i = 0; i < BUFFER_SIZE + 1; i++) {
+			buffer[i] = 1;
+		}
+		int count; //holds number of received bytes 
+		do {
+			count = recv(remote, (char*)&buffer, BUFFER_SIZE, 0); //receive a chunk (may not be the whole command)
+			buffer[count] = 0; //null-terminate it implicitly
+			//convert to wide string
+			std::string chunkString(buffer, count);
+			std::wstring wideChunkString(chunkString.begin(), chunkString.end() - 1);
+			*command += wideChunkString; //append this chunk to the command
+		} while (buffer[count - 1] != '\n');
+		//we now have the whole command as a wide string
+		closesocket(remote);
 
+		if (command->size() == 0) {
+			continue;
+		}
+
+		//add into command queue
+		FString2 commandString(command->c_str());
+		o_ExecuteConsoleCommand(&commandString);
 	}
 
+	return;
 }
-
-DECL_HOOK(FString*, FViewport, (FViewport_C* this_ptr, void* viewportClient))
-{
-	auto val = o_FViewport(this_ptr, viewportClient);
-	wchar_t* buildNr = wcschr(this_ptr->AppVersionString.str, L'+') + 1;
-	if (buildNr != nullptr)
-	{
-		uint32_t buildId = _wtoi(buildNr);
-		if (curBuild.buildId == 0 || curBuild.nameStr.length() == 0)
-		{
-			needsSerialization = true;
-			curBuild.SetName(this_ptr->AppVersionString.str + 7);
-
-			curBuild.buildId = buildId;
-			curBuild.fileHash = calculateCRC32("Chivalry2-Win64-Shipping.exe");
-		}
-		if (curBuild.nameStr.length() > 0)
-		{
-			printf("Build String found!%s\n\t%s\n", (curBuild.buildId == 0) ? "" : " (loaded)", curBuild.nameStr.c_str());
-
-			if (offsetsLoaded && needsSerialization)
-				serializeBuilds();
-		}
-
-#ifdef _DEBUG
-		//std::wcout << this_ptr->AppVersionString.str << ": " << buildNr << " " << buildId << std::endl;
-#endif
-	}
-	return val;
-}
-
-int LoadBuildConfig()
-{
-	// load config file
-	char* pValue;
-	size_t len;
-	char ladBuff[256];
-	errno_t err = _dupenv_s(&pValue, &len, "LOCALAPPDATA");
-	strncpy_s(ladBuff, 256, pValue, len);
-	strncpy_s(ladBuff + len - 1, 256 - len, "\\Chivalry 2\\Saved\\Config\\c2uc.builds.json", 42);
-
-	std::ifstream file(ladBuff, std::ios::binary);
-	if (!file.is_open()) {
-		std::cout << "Error opening build config" << std::endl;
-		return 0;
-	}
-	std::string buffer;
-	file.seekg(0, std::ios::end);
-	buffer.reserve(file.tellg());
-	file.seekg(0, std::ios::beg);
-
-	buffer.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-	file.close();
-
-	// parse json
-	json_t mem[128];
-	const json_t* json = json_create(const_cast<char*>(buffer.c_str()), mem, 128);
-
-	if (!json) {
-		puts("Failed to create json parser");
-		return EXIT_FAILURE;
-	}
-	uint32_t curFileHash = calculateCRC32("Chivalry2-Win64-Shipping.exe");
-
-	json_t const* buildEntry;
-	needsSerialization = true;
-	buildEntry = json_getChild(json);
-	while (buildEntry != 0) {
-		if (JSON_OBJ == json_getType(buildEntry)) {
-
-			char const* fileSize = json_getPropertyValue(buildEntry, "FileSize");
-			json_t const* build = json_getProperty(buildEntry, "Build");
-			char const* buildName = json_getName(buildEntry);
-			printf("parsing %s\n", buildName);
-
-			json_t const* fileHash = json_getProperty(buildEntry, "FileHash");
-			if (!fileHash || JSON_INTEGER != json_getType(fileHash)) {
-				puts("Error, the FileHash property is not found.");
-				return EXIT_FAILURE;
-			}
-			if (!build || JSON_INTEGER != json_getType(build)) {
-				puts("Error, the Build property is not found.");
-				return EXIT_FAILURE;
-			}
-			// compare hash
-			uint64_t fileHashVal = json_getInteger(fileHash);
-			bool hashMatch = fileHashVal == curFileHash;
-
-			// Create Build Config entry
-			BuildType bd_;
-			BuildType& bd = bd_;
-
-			if (hashMatch)
-			{
-				bd = curBuild;
-				needsSerialization = false;
-				printf("Found matching Build: %s\n", buildName);
-			}
-
-			printf("%s : %u\n", buildName, strlen(buildName));
-
-			if (strlen(buildName) > 0)
-			{
-				bd.SetName(buildName);
-			}
-
-			bd.buildId = (uint32_t)json_getInteger(build);
-			bd.fileHash = (uint32_t)fileHashVal;
-			for (uint8_t i = 0; i < F_MaxFuncType; ++i)
-			{
-				if (const json_t* GetMotd_j = json_getProperty(buildEntry, strFunc[i]))
-				{
-					if (JSON_INTEGER == json_getType(GetMotd_j))
-						if (uint32_t offsetVal = (uint32_t)json_getInteger(GetMotd_j))
-							bd.offsets[i] = offsetVal;
-					// offsets not found here will be scanned later
-				}
-				else if (hashMatch) needsSerialization = true;
-			}
-
-			if (hashMatch)
-				curBuild = bd;
-			else
-				configBuilds.push_back(new BuildType(bd));
-		}
-		buildEntry = json_getSibling(buildEntry);
-	}
-
-	return 0;
-}
-
-
 
 unsigned long main_thread(void* lpParameter) {
-	log(logo);
+	log(UNCHAINED_LOGO);
 	log("Chivalry 2 Unchained Plugin");
+	log("\nCommand line args:\n");
+	logWideString(GetCommandLineW());
+	log("\n");
+
 	MH_Initialize();
 
 	// https://github.com/HoShiMin/Sig
@@ -359,25 +183,9 @@ unsigned long main_thread(void* lpParameter) {
 	char buff[512];
 	char* dest = buff;
 
+	log("Serializing builds");
 	offsetsLoaded = true;
 	serializeBuilds();
-	// official
-	//auto sig_SendRequest= 0x14a1250;
-	//auto sig_GetMotd = 0x13da7d0;
-	//auto sig_GetCurrentGames = 0x13da280;
-	//auto sig_IsNonPakFilenameAllowed = 0x2fc3ce0;
-	//auto sig_FindFileInPakFiles_1 = 0x2fbf1a0;
-	//auto sig_FindFileInPakFiles_2 = 0x2fbf280;
-	//auto sig_UTBLLocalPlayer = 0x199cda3;
-
-	// ptr
-	//auto sig_SendRequest = 0x1425a10;
-	//auto sig_GetMotd = 0x135eb70;
-	//auto sig_GetCurrentGames = 0x135e620;
-	//auto sig_IsNonPakFilenameAllowed = 0x2f4dd80;
-	//auto sig_FindFileInPakFiles_1 = 0x2f49240;
-	//auto sig_FindFileInPakFiles_2 = 0x2f49320;
-	//auto sig_UTBLLocalPlayer = 0x1924926;
 
 	//HOOK_ATTACH(module_base, FViewport);
 	HOOK_ATTACH(module_base, GetMotd);
@@ -387,24 +195,61 @@ unsigned long main_thread(void* lpParameter) {
 	HOOK_ATTACH(module_base, FindFileInPakFiles_1);
 	HOOK_ATTACH(module_base, FindFileInPakFiles_2);
 	HOOK_ATTACH(module_base, GetGameInfo);
+	HOOK_ATTACH(module_base, ConsoleCommand);
+	HOOK_ATTACH(module_base, LoadFrontEndMap);
+	HOOK_ATTACH(module_base, CanUseLoadoutItem);
+	HOOK_ATTACH(module_base, CanUseCharacter);
+	HOOK_ATTACH(module_base, UGameplay__IsDedicatedServer);
+	HOOK_ATTACH(module_base, InternalGetNetMode);
 
+	bool useBackendBanList = CmdGetParam(L"--use-backend-banlist") != -1;
+	if (useBackendBanList) {
+		HOOK_ATTACH(module_base, FString_AppendChars);
+		HOOK_ATTACH(module_base, PreLogin);
 
-	// ServerPlugin
-	auto cmd_permission{ module_base + curBuild.offsets[F_UTBLLocalPlayer_Exec] }; // Patch for command permission when executing commands (UTBLLocalPlayer::Exec)
+	}
 
-	// 75 1A 45 84 ED 75 15 48 85 F6 74 10 40 38 BE ? ? ? ? 74 07 32 DB E9 ? ? ? ? 48 8B 5D 60 49 8B D6 4C 8B 45 58 4C 8B CB 49 8B CF (Points directly to instruction: first JNZ)
+	bool IsHeadless = CmdGetParam(L"-nullrhi") != -1;
+	if (IsHeadless) {
+		HOOK_ATTACH(module_base, GetOwnershipFromPlayerControllerAndState);
+	}
 
-	DWORD d;
-	VirtualProtect(cmd_permission, 1, PAGE_EXECUTE_READWRITE, &d);
-	*cmd_permission = 0xEB; // Patch to JMP
-	VirtualProtect(cmd_permission, 1, d, NULL); //TODO: Convert patch to hook.
+#ifdef PRINT_CLIENT_MSG
+	HOOK_ATTACH(module_base, ClientMessage);
+#endif 
+	
+	HOOK_ATTACH(module_base, ClientMessage);
+	HOOK_ATTACH(module_base, ExecuteConsoleCommand);
+	HOOK_ATTACH(module_base, GetTBLGameMode);
+	HOOK_ATTACH(module_base, FText_AsCultureInvariant);
+	HOOK_ATTACH(module_base, BroadcastLocalizedChat);
+	
+	if (curBuild.offsets[F_UTBLLocalPlayer_Exec])
+	{
+		// ServerPlugin
+		auto cmd_permission{ module_base + curBuild.offsets[F_UTBLLocalPlayer_Exec] }; // Patch for command permission when executing commands (UTBLLocalPlayer::Exec)
+
+		// From ServerPlugin
+		// Patch for command permission when executing commands (UTBLLocalPlayer::Exec)
+		Ptch_Repl(module_base + curBuild.offsets[F_UTBLLocalPlayer_Exec], 0xEB);
+	}
+	else
+		log("F_UTBLLocalPlayer_Exec missing");
+	
+	/*printf("offset dedicated: 0x%08X", curBuild.offsets[F_UGameplay__IsDedicatedServer] + 0x22);
+	Ptch_Repl(module_base + curBuild.offsets[F_UGameplay__IsDedicatedServer] + 0x22, 0x2);*/
+	// Dedicated server hook in ApproveLogin
+	//Nop(module_base + curBuild.offsets[F_ApproveLogin] + 0x46, 6);
+
+	log("Functions hooked. Continuing to RCON");
+	handleRCON(); //this has an infinite loop for commands! Keep this at the end!
 
 	ExitThread(0);
 	return 0;
 }
 
 int __stdcall DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-	#ifdef _DEBUG
+	#ifndef NDEBUG
 	if (!GetConsoleWindow()) {
 		AllocConsole();
 		FILE* file_pointer{};
